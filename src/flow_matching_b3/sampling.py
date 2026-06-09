@@ -27,9 +27,7 @@ from flow_matching_b3.paths import DDPMPath, VPPath, _BaseGaussianPath
 SolverName = Literal["euler", "midpoint", "rk4", "dopri5"]
 
 
-def _ddpm_eps_to_vector_field(
-    eps_pred: Tensor, x: Tensor, t: Tensor, path: VPPath
-) -> Tensor:
+def _ddpm_eps_to_vector_field(eps_pred: Tensor, x: Tensor, t: Tensor, path: VPPath) -> Tensor:
     """Convert a noise prediction into the probability-flow ODE vector field."""
     t_b = t.view(-1, *([1] * (x.dim() - 1)))
     alpha, sigma = path._alpha_sigma_bar(t_b)  # noqa: SLF001 — intentional package-internal use
@@ -184,19 +182,29 @@ def sample(
     solver: SolverName = "dopri5",
     device: torch.device | str = "cuda",
     seed: int | None = None,
+    sample_eps: float = 1e-5,
 ) -> tuple[Tensor, int]:
-    """High-level entry point: noise → samples + actual NFE used."""
+    """High-level entry point: noise → samples + actual NFE used.
+
+    For VP/DDPM paths integration stops at ``1 - sample_eps``: the DDPM
+    probability-flow field carries a ``1/σ̄(t)`` factor that is singular at the
+    data boundary t=1 (σ̄→0, clamped to 1e-6 → field ~5e4), and RK4/dopri5 would
+    otherwise evaluate it exactly there. OT has σ_t = σ_min > 0 at t=1 and the
+    CFM field is bounded, so it integrates all the way to t=1.
+    """
     generator = None
     if seed is not None:
         generator = torch.Generator(device=device).manual_seed(seed)
     x0 = torch.randn(shape, device=device, generator=generator)
     vf = make_vf(model, path)
+    # VPPath covers both VP and DDPM (DDPMPath subclasses it); OT is the else branch.
+    t_end = 1.0 - sample_eps if isinstance(path, VPPath) else 1.0
     if solver == "euler":
-        return euler_sample(vf, x0, nfe=nfe), nfe
+        return euler_sample(vf, x0, nfe=nfe, t_end=t_end), nfe
     if solver == "midpoint":
-        return midpoint_sample(vf, x0, nfe=nfe), (nfe // 2) * 2
+        return midpoint_sample(vf, x0, nfe=nfe, t_end=t_end), max(nfe // 2, 1) * 2
     if solver == "rk4":
-        return rk4_sample(vf, x0, nfe=nfe), (nfe // 4) * 4
+        return rk4_sample(vf, x0, nfe=nfe, t_end=t_end), max(nfe // 4, 1) * 4
     if solver == "dopri5":
-        return dopri5_sample(vf, x0)
+        return dopri5_sample(vf, x0, t_end=t_end)
     raise ValueError(f"Unknown solver: {solver!r}")

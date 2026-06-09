@@ -5,9 +5,11 @@ ResBlocks with GroupNorm, FiLM-style time conditioning, optional self-attention
 at chosen resolutions, strided-conv downsamplers, nearest-neighbour upsamplers,
 skip concatenation across the U.
 
-For CIFAR-10 the paper (Table 3) uses ``channels=256``, ``depth=2``,
-``channels_mult=(1, 2, 2, 2)``, attention at resolution 16, 4 heads of width 64.
-This module exposes those settings through :func:`adm_unet_cifar10`.
+For CIFAR-10 we follow the ADM/Dhariwal-Nichol CIFAR lineage: ``base_channels=128``
+(reaching 256 at the deepest level via ``channels_mult=(1, 2, 2, 2)``), ``depth=2``,
+attention at resolution 16, 4 heads of width 64 — which is exactly the full channel
+width (256) at that resolution. This is ~38M params, matching the paper's "not
+optimized for CIFAR-10" ADM backbone. Exposed through :func:`adm_unet_cifar10`.
 
 The 2-D MLP variant used for the checkerboard sanity experiment is also
 provided here as :class:`MLPVectorField`, since both share the same interface
@@ -67,9 +69,7 @@ class ResBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
         nn.init.zeros_(self.conv2.weight)
         nn.init.zeros_(self.conv2.bias)
-        self.skip = (
-            nn.Conv2d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
-        )
+        self.skip = nn.Conv2d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
 
     def forward(self, x: Tensor, t_emb: Tensor) -> Tensor:
         h = self.conv1(F.silu(self.norm1(x)))
@@ -136,7 +136,7 @@ class UNetConfig:
     image_size: int = 32
     in_channels: int = 3
     out_channels: int = 3
-    base_channels: int = 256
+    base_channels: int = 128
     channels_mult: tuple[int, ...] = (1, 2, 2, 2)
     num_res_blocks: int = 2
     attn_resolutions: tuple[int, ...] = (16,)
@@ -231,13 +231,17 @@ class UNet(nn.Module):
 
 
 def adm_unet_cifar10(dropout: float = 0.0) -> UNet:
-    """Paper config (Table 3, CIFAR-10): 256 ch, depth 2, attn@16, 4 heads × 64."""
+    """ADM CIFAR-10 config: base 128 ch (→256 at res 16), depth 2, attn@16, 4 heads × 64.
+
+    ~38.3M params. base=128 with mult (1,2,2,2) reaches 256 channels at resolution 16,
+    where the 4×64=256 attention covers the full width (no bottleneck).
+    """
     return UNet(
         UNetConfig(
             image_size=32,
             in_channels=3,
             out_channels=3,
-            base_channels=256,
+            base_channels=128,
             channels_mult=(1, 2, 2, 2),
             num_res_blocks=2,
             attn_resolutions=(16,),

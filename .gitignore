@@ -1,3 +1,17 @@
+# caches
 .pytest_cache
 .ruff_cache
+__pycache__/
+*.py[cod]
+
+# envs
 .venv
+
+# data / runs / outputs
+data/
+runs/
+*.pt
+wandb/
+
+# notebook outputs (use nbstripout)
+.ipynb_checkpoints/

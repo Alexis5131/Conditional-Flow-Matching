@@ -4,7 +4,7 @@ Reproduction réduite de **Lipman et al., *Flow Matching for Generative Modeling
 
 ## Ce qu'on reproduit
 
-Le triplet du Table 1 du papier sur CIFAR-10 (~36 M paramètres, 391 k steps) :
+Le triplet du Table 1 du papier sur CIFAR-10 (~38 M paramètres, 391 k steps) :
 
 | Modèle           | Loss        | Cible                                     | FID papier |
 |------------------|-------------|-------------------------------------------|------------|
@@ -25,7 +25,8 @@ src/flow_matching_b3/
   ema.py          EMA shadow with swap-in context manager
   fid.py          clean-fid wrapper, CIFAR-10 train stats
   train.py        TrainConfig + train(cfg) — used by the notebook
-tests/test_paths.py     analytical target vs autodiff (7 tests)
+tests/test_paths.py     analytical target vs autodiff
+tests/test_sampling.py  DDPM ε→vector-field + fix de la singularité t=1
 notebooks/
   01_sanity_2d.ipynb        — toy checkerboard (P2 du plan)
   02_train_cifar.ipynb      — ★ main training notebook (Colab)
@@ -36,7 +37,7 @@ notebooks/
 
 ```bash
 uv sync --extra dev
-uv run pytest tests/                # 7 tests sur les paths
+uv run pytest tests/                # 11 tests (paths + samplers)
 uv run jupyter notebook notebooks/01_sanity_2d.ipynb
 ```
 
@@ -50,25 +51,33 @@ uv run jupyter notebook notebooks/01_sanity_2d.ipynb
 
 La reprise depuis le dernier checkpoint est automatique — si Colab coupe une session, relancer le notebook reprend là où ça en était.
 
-## Hyper-paramètres (aligné Table 3 du papier, CIFAR-10)
+## Hyper-paramètres (lignée ADM / Dhariwal-Nichol — le papier sous-spécifie CIFAR-10)
 
 | Param                | Valeur      |
 |----------------------|-------------|
-| U-Net channels       | 256         |
+| U-Net base channels  | 128 (→ 256 à la résolution 16) |
+| Params               | ~38.3 M     |
 | Depth / mult         | 2 / (1,2,2,2) |
-| Attention            | résolution 16, 4 heads × 64 |
-| Optim                | Adam, lr=5e-4, wd=0 |
-| LR schedule          | polynomial decay, warmup 45 k |
-| Batch                | 256         |
-| Steps                | 391 000     |
-| EMA                  | 0.9999      |
+| Attention            | résolution 16, 4 heads × 64 (= pleine largeur 256) |
+| Optim                | Adam (β=0.9/0.999, ε=1e-8), lr=1e-4, wd=0 |
+| LR schedule          | warmup 45 k + decay linéaire — choix repo (ADM utilise lr constant, *à vérifier*) |
+| Batch effectif       | 256 = batch physique × `accum_iter` (ex. 64 × 4 sur A100 40 Go) |
+| Steps (optim)        | 391 000     |
+| EMA                  | 0.9999 (avec warmup de decay) |
 | Précision            | FP32        |
 | σ_min (OT)           | 1e-4        |
 | β_min / β_max (VP)   | 0.1 / 20    |
+| Sampler (Table 1)    | dopri5, atol=rtol=1e-5 (valeur exacte du papier) |
+| FID                  | clean-fid `mode="legacy_tensorflow"`, 50 k échantillons |
+
+> **Note repro** : Lipman et al. n'optimisent pas l'archi pour CIFAR-10 et ne tabulent
+> pas clairement lr/batch/steps. On suit le défaut ADM (lr 1e-4). Le FID est calculé en
+> protocole `legacy_tensorflow` (Inception TF), seul comparable aux 6.35/8.06/7.48 — pas
+> `mode="clean"`. Les chiffres mid-training/Fig. 7 à 10 k sont biaisés ↑ vs les 50 k de la table.
 
 ## Tests
 
-`uv run pytest tests/` — les 7 tests vérifient en particulier que la cible analytique $u_t(x \mid x_1)$ retournée par chaque path est égale à la dérivée temporelle de $\psi_t$ calculée par autodiff (tolérance 1e-5).
+`uv run pytest tests/` — les 11 tests vérifient en particulier que (a) la cible analytique $u_t(x \mid x_1)$ de chaque path égale la dérivée temporelle de $\psi_t$ par autodiff (tol. 1e-5), et (b) la conversion DDPM $\varepsilon \to$ champ de vitesse reproduit le champ VP analytique, avec la singularité en $t=1$ contournée par les samplers.
 
 ## Références
 

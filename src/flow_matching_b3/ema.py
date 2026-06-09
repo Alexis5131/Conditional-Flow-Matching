@@ -17,6 +17,7 @@ from torch import nn
 class EMA:
     def __init__(self, model: nn.Module, decay: float = 0.9999):
         self.decay = decay
+        self.step = 0
         self.shadow = deepcopy(model)
         self.shadow.eval()
         for p in self.shadow.parameters():
@@ -24,9 +25,13 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
-        d = self.decay
+        self.step += 1
+        # Bias-corrected warmup so the shadow tracks the live model early on instead
+        # of staying anchored to the random init (decay^step decays slowly otherwise).
+        d = min(self.decay, (1 + self.step) / (10 + self.step))
         for p_ema, p in zip(self.shadow.parameters(), model.parameters(), strict=True):
             p_ema.mul_(d).add_(p.detach(), alpha=1.0 - d)
+        # Buffers (none for GroupNorm) are copied, not averaged — fine for buffer-free norms.
         for b_ema, b in zip(self.shadow.buffers(), model.buffers(), strict=True):
             b_ema.copy_(b)
 
@@ -43,8 +48,9 @@ class EMA:
                 p.data.copy_(b)
 
     def state_dict(self) -> dict:
-        return {"decay": self.decay, "shadow": self.shadow.state_dict()}
+        return {"decay": self.decay, "step": self.step, "shadow": self.shadow.state_dict()}
 
     def load_state_dict(self, state: dict) -> None:
         self.decay = state["decay"]
+        self.step = state.get("step", 0)  # tolerate checkpoints written before warmup was added
         self.shadow.load_state_dict(state["shadow"])

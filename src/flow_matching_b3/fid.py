@@ -2,8 +2,14 @@
 
 We compute FID in a sample-folder mode: the generator dumps PNG images to a
 temp folder, then ``clean_fid.fid.compute_fid(folder, dataset_name="cifar10",
-dataset_split="train", mode="clean")`` does the rest, using the cached
-reference statistics shipped by the library.
+dataset_split="train", mode=...)`` does the rest, using the cached reference
+statistics shipped by the library.
+
+Default ``mode="legacy_tensorflow"`` reproduces the original TensorFlow-Inception
+FID protocol used by the DDPM/ADM lineage and reported by Lipman et al. (the
+6.35 / 8.06 / 7.48 numbers). Do NOT use ``mode="clean"`` (clean-fid's improved
+resizer + PyTorch Inception) if you want to compare to those paper numbers — it
+yields a systematically different, non-comparable score.
 
 Samples must be in [0, 1] float tensors, shape (N, 3, H, W). They are clamped
 and converted to uint8 PNGs (no anti-aliasing) before scoring.
@@ -43,14 +49,17 @@ def compute_fid_cifar10(
     sample_iter: Iterator[Tensor],
     *,
     n_samples: int,
+    mode: str = "legacy_tensorflow",
     workdir: Path | None = None,
     keep_samples: bool = False,
 ) -> float:
     """Compute FID between ``sample_iter`` and the CIFAR-10 train set.
 
     ``sample_iter`` must yield enough batches to reach ``n_samples`` images
-    (extras are ignored). Uses ``clean-fid`` so the score is comparable to
-    other papers using the same library.
+    (extras are ignored). ``mode`` selects the clean-fid protocol; the default
+    ``"legacy_tensorflow"`` matches the paper's TF-Inception FID (comparable to
+    the reported 6.35 / 8.06 / 7.48). Use ``n_samples=50_000`` for any number
+    you put next to the paper's; fewer samples bias FID upward.
     """
     from cleanfid import fid
 
@@ -78,7 +87,7 @@ def compute_fid_cifar10(
             str(folder),
             dataset_name="cifar10",
             dataset_split="train",
-            mode="clean",
+            mode=mode,
             dataset_res=32,
         )
         return float(score)
