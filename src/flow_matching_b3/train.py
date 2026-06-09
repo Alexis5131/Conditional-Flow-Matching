@@ -26,7 +26,7 @@ from tqdm.auto import tqdm
 from flow_matching_b3.ema import EMA
 from flow_matching_b3.losses import get_loss_fn
 from flow_matching_b3.paths import PathType, get_path
-from flow_matching_b3.unet import UNet, adm_unet_cifar10
+from flow_matching_b3.unet import adm_unet_cifar10
 
 # ---------------------------------------------------------------------------
 # Config
@@ -73,6 +73,13 @@ class TrainConfig:
     dtype: str = "float32"  # "float32" | "bfloat16" | "float16"
     grad_clip: float = 1.0
     num_workers: int = 4
+
+    # CUDA fast paths (A100) — all no-ops on CPU
+    tf32: bool = (
+        True  # TF32 TensorCores for fp32 matmul/conv: big speedup, negligible precision cost
+    )
+    channels_last: bool = True  # NHWC memory format → faster TensorCore convs
+    compile: bool = True  # torch.compile the UNet forward (kernel fusion); first ~100 steps compile
 
     # Misc
     seed: int = 42
@@ -131,6 +138,7 @@ def make_cifar10_loader(cfg: TrainConfig) -> DataLoader:
         num_workers=cfg.num_workers,
         pin_memory=True,
         persistent_workers=cfg.num_workers > 0,
+        prefetch_factor=4 if cfg.num_workers > 0 else None,
     )
 
 
@@ -140,15 +148,49 @@ def _infinite(loader: DataLoader):
 
 
 # ---------------------------------------------------------------------------
+# CUDA fast paths
+# ---------------------------------------------------------------------------
+
+
+def enable_cuda_perf(*, tf32: bool = True) -> None:
+    """Enable A100-friendly CUDA fast paths. Idempotent and a no-op on CPU.
+
+    - cudnn.benchmark: autotune conv algorithms for the fixed CIFAR shapes.
+    - TF32: run fp32 matmul/conv on TensorCores (large A100 speedup, tiny precision cost).
+    """
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cudnn.benchmark = True
+    if tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
+
+def _unwrap(model: torch.nn.Module) -> torch.nn.Module:
+    """Return the original module behind a torch.compile wrapper (clean state_dict keys)."""
+    return getattr(model, "_orig_mod", model)
+
+
+# ---------------------------------------------------------------------------
 # Build model / path / optim
 # ---------------------------------------------------------------------------
 
 
-def build(cfg: TrainConfig) -> tuple[UNet, Adam, EMA, object]:
+def build(cfg: TrainConfig) -> tuple[torch.nn.Module, Adam, EMA, object]:
     torch.manual_seed(cfg.seed)
-    model = adm_unet_cifar10(dropout=cfg.dropout).to(cfg.device)
+    model: torch.nn.Module = adm_unet_cifar10(dropout=cfg.dropout).to(cfg.device)
+    if cfg.channels_last:
+        model = model.to(memory_format=torch.channels_last)
+    # optim + EMA are built on the raw module (same param tensors torch.compile reuses);
+    # the EMA shadow stays uncompiled — we sample from it at eval without recompiling.
     optim = Adam(model.parameters(), lr=cfg.lr_peak, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
     ema = EMA(model, decay=cfg.ema_decay)
+    if cfg.compile and torch.cuda.is_available():
+        try:
+            model = torch.compile(model)
+        except Exception as exc:  # pragma: no cover — environment dependent
+            print(f"[compile] disabled: {exc}")
     if cfg.path_type == "ot":
         path = get_path("ot", sigma_min=cfg.sigma_min)
     elif cfg.path_type == "vp":
@@ -179,7 +221,7 @@ def save_ckpt(
     torch.save(
         {
             "step": step,
-            "model": model.state_dict(),
+            "model": _unwrap(model).state_dict(),  # strip the torch.compile "_orig_mod." prefix
             "optim": optim.state_dict(),
             "ema": ema.state_dict(),
             "cfg": cfg.to_json(),
@@ -193,7 +235,7 @@ def load_ckpt(
     path: Path, *, model: torch.nn.Module, optim: Adam, ema: EMA, device: str
 ) -> tuple[int, dict]:
     state = torch.load(path, map_location=device)
-    model.load_state_dict(state["model"])
+    _unwrap(model).load_state_dict(state["model"])
     optim.load_state_dict(state["optim"])
     ema.load_state_dict(state["ema"])
     return state["step"], state["rng"]
@@ -238,6 +280,7 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     (cfg.run_dir / "config.json").write_text(cfg.to_json())
 
+    enable_cuda_perf(tf32=cfg.tf32)
     model, optim, ema, path = build(cfg)
     loss_fn = get_loss_fn(path)
 
@@ -276,6 +319,7 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
 
     accum = max(1, cfg.accum_iter)
     eff_batch = cfg.batch_size * accum
+    mem_fmt = torch.channels_last if cfg.channels_last else torch.contiguous_format
     print(f"[train] physical batch={cfg.batch_size} × accum={accum} → effective batch={eff_batch}")
 
     model.train()
@@ -287,11 +331,11 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
             g["lr"] = lr_at(step, cfg)
 
         optim.zero_grad(set_to_none=True)
-        loss_sum = 0.0
-        diag_sum: dict[str, float] = {}
+        loss_acc: Tensor | None = None
+        diag_acc: dict[str, Tensor] = {}
         for _ in range(accum):
             x, _ = next(data_iter)
-            x = x.to(cfg.device, non_blocking=True)
+            x = x.to(cfg.device, non_blocking=True, memory_format=mem_fmt)
             with torch.amp.autocast("cuda", dtype=autocast_dtype, enabled=use_amp):
                 loss, diag = loss_fn(model, x, path, eps=cfg.time_eps)
             scaled = loss / accum  # so accumulated grads match a single effective-batch step
@@ -299,9 +343,10 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
                 scaler.scale(scaled).backward()
             else:
                 scaled.backward()
-            loss_sum += loss.item()
+            # Accumulate metrics on-device (no host sync per micro-step); .item() only at log time.
+            loss_acc = loss.detach() if loss_acc is None else loss_acc + loss.detach()
             for k, v in diag.items():
-                diag_sum[k] = diag_sum.get(k, 0.0) + v.item()
+                diag_acc[k] = v if k not in diag_acc else diag_acc[k] + v
 
         if cfg.dtype == "float16":
             scaler.unscale_(optim)
@@ -316,7 +361,8 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
 
         if step % cfg.log_every == 0:
             speed = (step - start_step + 1) / max(1e-6, time.time() - t0)
-            loss_mean = loss_sum / accum
+            loss_mean = (loss_acc / accum).item()  # single host sync per log step
+            diag_mean = {k: (v / accum).item() for k, v in diag_acc.items()}
             pbar.set_postfix(
                 loss=f"{loss_mean:.4f}", lr=f"{lr_at(step, cfg):.2e}", it_s=f"{speed:.2f}"
             )
@@ -326,7 +372,7 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
                     "step": step,
                     "loss": round(loss_mean, 6),
                     "lr": round(lr_at(step, cfg), 10),
-                    **{k: round(v / accum, 6) for k, v in diag_sum.items() if k != "loss"},
+                    **{k: round(val, 6) for k, val in diag_mean.items() if k != "loss"},
                     "it_per_s": round(speed, 3),
                     "elapsed_s": round(time.time() - t0, 1),
                 },
@@ -336,7 +382,7 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
                     {
                         "train/loss": loss_mean,
                         "train/lr": lr_at(step, cfg),
-                        **{f"train/{k}": v / accum for k, v in diag_sum.items()},
+                        **{f"train/{k}": val for k, val in diag_mean.items()},
                         "train/it_per_s": speed,
                     },
                     step=step,
@@ -359,7 +405,9 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
         if cfg.eval_every and (step + 1) % cfg.eval_every == 0 and fid_fn is not None:
             with ema.swap_into(model):
                 model.eval()
-                fid = fid_fn(model)
+                # Sample through the uncompiled module: eval batch sizes vary, so the
+                # compiled graph would otherwise recompile for each one.
+                fid = fid_fn(_unwrap(model))
                 model.train()
             append_csv(cfg.run_dir / "fid.csv", {"step": step + 1, "fid": round(fid, 4)})
             if wb is not None:

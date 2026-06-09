@@ -75,6 +75,12 @@ La reprise depuis le dernier checkpoint est automatique — si Colab coupe une s
 > protocole `legacy_tensorflow` (Inception TF), seul comparable aux 6.35/8.06/7.48 — pas
 > `mode="clean"`. Les chiffres mid-training/Fig. 7 à 10 k sont biaisés ↑ vs les 50 k de la table.
 
+> **Perf A100** : activées par défaut (`tf32`, `channels_last`, `compile` dans `TrainConfig`,
+> tous no-op sur CPU) — TF32 TensorCores pour le fp32, mémoire NHWC, `torch.compile` (fusion
+> de kernels), `cudnn.benchmark`, prefetch dataloader. Le batch effectif 256 est préservé via
+> accumulation. La cellule smoke-test du notebook 02 mesure VRAM + débit (gain réel à confirmer
+> sur l'A100). bf16 (`dtype="bfloat16"`) donne ~1.5–2× de plus mais s'écarte du FP32 du papier.
+
 ## Tests
 
 `uv run pytest tests/` — les 11 tests vérifient en particulier que (a) la cible analytique $u_t(x \mid x_1)$ de chaque path égale la dérivée temporelle de $\psi_t$ par autodiff (tol. 1e-5), et (b) la conversion DDPM $\varepsilon \to$ champ de vitesse reproduit le champ VP analytique, avec la singularité en $t=1$ contournée par les samplers.
