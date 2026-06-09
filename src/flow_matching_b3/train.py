@@ -1,9 +1,11 @@
 """Training loop for the CIFAR-10 reproduction.
 
 Designed to be driven from a notebook cell. The :class:`TrainConfig` carries
-every hyper-parameter (mirroring Table 3 of Lipman 2023 for CIFAR-10) and
-:func:`train` runs the loop end-to-end, with deterministic resumption from any
-checkpoint written under ``cfg.run_dir/ckpt_*.pt``.
+every hyper-parameter (ADM/Dhariwal-Nichol CIFAR lineage; the paper itself
+under-specifies CIFAR-10) and :func:`train` runs the loop end-to-end. Resumption
+from any checkpoint under ``cfg.run_dir/ckpt_*.pt`` restores model/optim/EMA and
+RNG state; the data-loader ordering is *not* replayed bit-exactly, so a resumed
+run follows a different but statistically-equivalent data stream.
 """
 
 from __future__ import annotations
@@ -37,12 +39,15 @@ class TrainConfig:
     run_dir: Path = Path("./runs/fm-ot")
     data_root: Path = Path("./data/cifar10")
 
-    # Optimisation (Table 3, CIFAR-10)
-    max_steps: int = 391_000
-    batch_size: int = 256
-    lr_peak: float = 5e-4
+    # Optimisation (ADM / Dhariwal-Nichol CIFAR-10 lineage)
+    max_steps: int = 391_000  # number of optimiser steps
+    batch_size: int = 64  # physical / micro-batch (sized to fit the GPU; see notebook smoke test)
+    accum_iter: int = 4  # grad-accumulation micro-steps; effective batch = batch_size * accum_iter
+    lr_peak: float = 1e-4  # ADM default (the paper inherits Dhariwal-Nichol and does not retune lr)
     lr_init: float = 1e-8
-    warmup_steps: int = 45_000
+    warmup_steps: int = (
+        45_000  # NB: ADM/DDPM use ~constant lr; warmup+decay is a repo choice (à vérifier)
+    )
     poly_decay: bool = True
 
     # Path-specific
@@ -202,6 +207,27 @@ def find_latest_ckpt(run_dir: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
+# Lightweight CSV metrics logger (Drive-friendly, independent of wandb)
+# ---------------------------------------------------------------------------
+
+
+def append_csv(path: Path, row: dict[str, float | int]) -> None:
+    """Append one row to a CSV, writing the header if the file is new.
+
+    Persists training/eval metrics next to the checkpoints (on Google Drive in
+    Colab) so the curves survive a session disconnect even with wandb disabled.
+    On resume the file already exists, so we just keep appending. The key order
+    of ``row`` must stay stable across calls (it defines the columns).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists()
+    with path.open("a") as f:
+        if write_header:
+            f.write(",".join(row.keys()) + "\n")
+        f.write(",".join(str(v) for v in row.values()) + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
@@ -240,34 +266,49 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
     loader = make_cifar10_loader(cfg)
     data_iter = _infinite(loader)
 
-    autocast_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[
-        cfg.dtype
-    ]
+    autocast_dtype = {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }[cfg.dtype]
     use_amp = autocast_dtype != torch.float32
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.dtype == "float16")
+
+    accum = max(1, cfg.accum_iter)
+    eff_batch = cfg.batch_size * accum
+    print(f"[train] physical batch={cfg.batch_size} × accum={accum} → effective batch={eff_batch}")
 
     model.train()
     t0 = time.time()
     pbar = tqdm(range(start_step, cfg.max_steps), initial=start_step, total=cfg.max_steps)
     for step in pbar:
-        x, _ = next(data_iter)
-        x = x.to(cfg.device, non_blocking=True)
-
+        # One pbar iteration == one optimiser step over the effective batch.
         for g in optim.param_groups:
             g["lr"] = lr_at(step, cfg)
 
         optim.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda", dtype=autocast_dtype, enabled=use_amp):
-            loss, diag = loss_fn(model, x, path, eps=cfg.time_eps)
+        loss_sum = 0.0
+        diag_sum: dict[str, float] = {}
+        for _ in range(accum):
+            x, _ = next(data_iter)
+            x = x.to(cfg.device, non_blocking=True)
+            with torch.amp.autocast("cuda", dtype=autocast_dtype, enabled=use_amp):
+                loss, diag = loss_fn(model, x, path, eps=cfg.time_eps)
+            scaled = loss / accum  # so accumulated grads match a single effective-batch step
+            if cfg.dtype == "float16":
+                scaler.scale(scaled).backward()
+            else:
+                scaled.backward()
+            loss_sum += loss.item()
+            for k, v in diag.items():
+                diag_sum[k] = diag_sum.get(k, 0.0) + v.item()
 
         if cfg.dtype == "float16":
-            scaler.scale(loss).backward()
             scaler.unscale_(optim)
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             scaler.step(optim)
             scaler.update()
         else:
-            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optim.step()
 
@@ -275,13 +316,27 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
 
         if step % cfg.log_every == 0:
             speed = (step - start_step + 1) / max(1e-6, time.time() - t0)
-            pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr_at(step, cfg):.2e}", it_s=f"{speed:.2f}")
+            loss_mean = loss_sum / accum
+            pbar.set_postfix(
+                loss=f"{loss_mean:.4f}", lr=f"{lr_at(step, cfg):.2e}", it_s=f"{speed:.2f}"
+            )
+            append_csv(
+                cfg.run_dir / "metrics.csv",
+                {
+                    "step": step,
+                    "loss": round(loss_mean, 6),
+                    "lr": round(lr_at(step, cfg), 10),
+                    **{k: round(v / accum, 6) for k, v in diag_sum.items() if k != "loss"},
+                    "it_per_s": round(speed, 3),
+                    "elapsed_s": round(time.time() - t0, 1),
+                },
+            )
             if wb is not None:
                 wb.log(
                     {
-                        "train/loss": loss.item(),
+                        "train/loss": loss_mean,
                         "train/lr": lr_at(step, cfg),
-                        **{f"train/{k}": v.item() for k, v in diag.items()},
+                        **{f"train/{k}": v / accum for k, v in diag_sum.items()},
                         "train/it_per_s": speed,
                     },
                     step=step,
@@ -306,6 +361,7 @@ def train(cfg: TrainConfig, *, fid_fn: Callable[[torch.nn.Module], float] | None
                 model.eval()
                 fid = fid_fn(model)
                 model.train()
+            append_csv(cfg.run_dir / "fid.csv", {"step": step + 1, "fid": round(fid, 4)})
             if wb is not None:
                 wb.log({"eval/fid": fid}, step=step)
             print(f"[eval] step={step + 1} FID(EMA, {cfg.eval_n_samples} samples)={fid:.3f}")
