@@ -70,7 +70,11 @@ class TrainConfig:
 
     # Hardware
     device: str = "cuda"
-    dtype: str = "float32"  # "float32" | "bfloat16" | "float16"
+    dtype: str = (
+        "bfloat16"  # "float32" | "bfloat16" | "float16". bf16 is the A100 default: native
+        # TensorCore support, ~2× over fp32 on conv/matmul, full fp32 exponent range so no
+        # GradScaler and no overflow risk. Standard for diffusion training; FID tracks fp32.
+    )
     grad_clip: float = 1.0
     num_workers: int = 4
 
@@ -79,7 +83,12 @@ class TrainConfig:
         True  # TF32 TensorCores for fp32 matmul/conv: big speedup, negligible precision cost
     )
     channels_last: bool = True  # NHWC memory format → faster TensorCore convs
-    compile: bool = True  # torch.compile the UNet forward (kernel fusion); first ~100 steps compile
+    compile: bool = True  # torch.compile the UNet forward (kernel fusion); first steps compile
+    compile_mode: str = (
+        "max-autotune-no-cudagraphs"  # Triton kernel autotuning (best conv/matmul tile sizes
+        # on A100) without CUDA graphs — graphs are fragile with dynamic LR + grad accumulation.
+        # Higher one-time compile cost, amortised over a 391k-step run. "default" is the fallback.
+    )
 
     # Misc
     seed: int = 42
@@ -184,11 +193,23 @@ def build(cfg: TrainConfig) -> tuple[torch.nn.Module, Adam, EMA, object]:
         model = model.to(memory_format=torch.channels_last)
     # optim + EMA are built on the raw module (same param tensors torch.compile reuses);
     # the EMA shadow stays uncompiled — we sample from it at eval without recompiling.
-    optim = Adam(model.parameters(), lr=cfg.lr_peak, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+    # fused=True runs the whole Adam step as one CUDA kernel (vs the multi-tensor
+    # default); compatible with GradScaler. Unsupported on CPU, so guard on CUDA.
+    optim = Adam(
+        model.parameters(),
+        lr=cfg.lr_peak,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.0,
+        fused=torch.cuda.is_available(),
+    )
     ema = EMA(model, decay=cfg.ema_decay)
     if cfg.compile and torch.cuda.is_available():
         try:
-            model = torch.compile(model)
+            # dynamic=False: the train batch is fixed (drop_last=True) and CIFAR is 32×32,
+            # so the graph is static — skip dynamic-shape guards/recompiles and let the
+            # autotuner specialise on the one shape it ever sees.
+            model = torch.compile(model, mode=cfg.compile_mode, dynamic=False)
         except Exception as exc:  # pragma: no cover — environment dependent
             print(f"[compile] disabled: {exc}")
     if cfg.path_type == "ot":

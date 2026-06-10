@@ -22,6 +22,9 @@ class EMA:
         self.shadow.eval()
         for p in self.shadow.parameters():
             p.requires_grad_(False)
+        # Cache the shadow param list once: the foreach update needs lists, not
+        # generators, and the param set is fixed for the model's lifetime.
+        self._shadow_params: list[nn.Parameter] = list(self.shadow.parameters())
 
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
@@ -29,8 +32,13 @@ class EMA:
         # Bias-corrected warmup so the shadow tracks the live model early on instead
         # of staying anchored to the random init (decay^step decays slowly otherwise).
         d = min(self.decay, (1 + self.step) / (10 + self.step))
-        for p_ema, p in zip(self.shadow.parameters(), model.parameters(), strict=True):
-            p_ema.mul_(d).add_(p.detach(), alpha=1.0 - d)
+        # Fused multi-tensor update: two grouped kernels instead of one mul_+add_
+        # pair per parameter tensor (~265 for the UNet), cutting launch overhead
+        # that matters once the forward is torch.compile'd. shadow.parameters()
+        # and model.parameters() iterate in the same order (shadow is a deepcopy).
+        model_params = list(model.parameters())
+        torch._foreach_mul_(self._shadow_params, d)
+        torch._foreach_add_(self._shadow_params, model_params, alpha=1.0 - d)
         # Buffers (none for GroupNorm) are copied, not averaged — fine for buffer-free norms.
         for b_ema, b in zip(self.shadow.buffers(), model.buffers(), strict=True):
             b_ema.copy_(b)
