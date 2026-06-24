@@ -1,0 +1,14 @@
+# LaTeX build artifacts (rapport.tex compiles to rapport.pdf)
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.log
+*.lot
+*.out
+*.run.xml
+*.toc
+*.pdf

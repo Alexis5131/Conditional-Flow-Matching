@@ -26,7 +26,7 @@ from tqdm.auto import tqdm
 from flow_matching_b3.ema import EMA
 from flow_matching_b3.losses import get_loss_fn
 from flow_matching_b3.paths import PathType, get_path
-from flow_matching_b3.unet import adm_unet_cifar10
+from flow_matching_b3.unet import adm_unet_cifar10_small
 
 # ---------------------------------------------------------------------------
 # Config
@@ -40,13 +40,14 @@ class TrainConfig:
     data_root: Path = Path("./data/cifar10")
 
     # Optimisation (ADM / Dhariwal-Nichol CIFAR-10 lineage)
-    max_steps: int = 391_000  # number of optimiser steps
+    # Resit: reduced budget for the ~6.9M small model (adm_unet_cifar10_small).
+    max_steps: int = 150_000  # number of optimiser steps (was 391k; small model converges sooner)
     batch_size: int = 64  # physical / micro-batch (sized to fit the GPU; see notebook smoke test)
     accum_iter: int = 4  # grad-accumulation micro-steps; effective batch = batch_size * accum_iter
     lr_peak: float = 1e-4  # ADM default (the paper inherits Dhariwal-Nichol and does not retune lr)
     lr_init: float = 1e-8
     warmup_steps: int = (
-        45_000  # NB: ADM/DDPM use ~constant lr; warmup+decay is a repo choice (à vérifier)
+        5_000  # NB: ADM/DDPM use ~constant lr; warmup+decay is a repo choice (à vérifier)
     )
     poly_decay: bool = True
 
@@ -188,7 +189,7 @@ def _unwrap(model: torch.nn.Module) -> torch.nn.Module:
 
 def build(cfg: TrainConfig) -> tuple[torch.nn.Module, Adam, EMA, object]:
     torch.manual_seed(cfg.seed)
-    model: torch.nn.Module = adm_unet_cifar10(dropout=cfg.dropout).to(cfg.device)
+    model: torch.nn.Module = adm_unet_cifar10_small(dropout=cfg.dropout).to(cfg.device)
     if cfg.channels_last:
         model = model.to(memory_format=torch.channels_last)
     # optim + EMA are built on the raw module (same param tensors torch.compile reuses);

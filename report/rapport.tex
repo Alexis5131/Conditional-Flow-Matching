@@ -1,0 +1,498 @@
+\documentclass{article}
+
+%%%%%%% PACKAGES %%%%%%%%
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{lmodern}
+\usepackage[margin=2cm]{geometry}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{notoccite}   % citation number ordering
+\usepackage{lscape}      % landscape table
+\usepackage{caption}     % add a newline in the table caption
+\usepackage{microtype}
+
+% --- Maths / tableaux / liens ---
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue!55!black,urlcolor=blue!60!black]{hyperref}
+
+% --- Schémas ---
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,decorations.pathmorphing,positioning,calc}
+
+\usepackage[
+backend=biber,   % references format (IEEE)
+style=ieee,
+sorting=none
+]{biblatex}
+\addbibresource{refs.bib}
+\onehalfspace    % 1.5 line spacing
+
+\setlength{\emergencystretch}{3em} % évite les overfull dus aux tokens \texttt non sécables
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\TODO}[1]{{\color{red}\textbf{[#1]}}}
+
+% Figure robuste : insère l'image si elle existe, sinon un cadre placeholder.
+\newcommand{\figslot}[3]{% #1 = chemin image, #2 = hauteur placeholder, #3 = texte placeholder
+  \IfFileExists{#1}%
+    {\includegraphics[width=0.95\textwidth]{#1}}%
+    {\fbox{\begin{minipage}[c][#2][c]{0.93\textwidth}\centering\itshape #3\end{minipage}}}}
+
+\title{\huge{\textbf{Rapport de projet}} \\
+\LARGE{Flow Matching for Generative Modeling \\ reproduction réduite sur CIFAR-10 --- chemin OT}}
+\author{Alexis Arnaud, Thomas Le Bourdon}
+\date{Juin 2026}
+
+\begin{document}
+\pagenumbering{roman} % Start roman numbering
+\clearpage\maketitle
+\thispagestyle{empty}
+\begin{center}
+    \begin{figure}[h]
+        \centering
+        \figslot{pics/logo.png}{3cm}{logo de l'école (à placer dans \texttt{pics/logo.png})}
+        \label{fig:logo}
+    \end{figure}
+    \large{Introduction to Deep Learning --- Projet de validation (B3) \\
+    Encadrant : A. Bouru-Gazeau \\
+    Papier : Lipman et al., \emph{Flow Matching for Generative Modeling}, ICLR 2023}
+\end{center}
+\newpage
+\setcounter{page}{1}
+\tableofcontents
+\listoffigures
+\listoftables
+
+\newpage
+\pagenumbering{arabic} % Start arabic numbering
+
+%%% CONTENT HERE %%%%
+
+% =====================================================================
+\section*{Note de version (resit)}
+\addcontentsline{toc}{section}{Note de version (resit)}
+
+Cette version resit resserre volontairement le projet sur la conclusion centrale du papier afin de
+\textbf{réduire le coût de calcul} et de renforcer la partie théorique :
+\begin{itemize}\setlength\itemsep{0.1em}
+\item \textbf{Modèle beaucoup plus petit} : backbone ADM réduit (\code{adm\_unet\_cifar10\_small},
+  \textbf{6\,949\,187 paramètres} $\approx$ 6,9~M, contre 38,3~M dans la version initiale).
+\item \textbf{Une seule méthode : FM-OT}. Les chemins VP et DDPM restent implémentés dans le code
+  (\code{paths.py}, tests verts) mais ne sont plus entraînés ni évalués.
+\item \textbf{Une seule ablation : la métrique de rectitude} $C$, étudiée sur deux axes
+  (en fonction du NFE/solveur, et au fil de l'entraînement).
+\item \textbf{Explication du papier déroulée} : §\ref{sec:methode} reprend les dérivations pas à pas
+  (équation de continuité, équivalence FM~$\leftrightarrow$~CFM, Théorème~3, spécialisation OT).
+\item \textbf{Schémas} ajoutés (Fig.~\ref{fig:generative}, \ref{fig:condmarg}, \ref{fig:rectitude}).
+\end{itemize}
+Le \textbf{protocole de reproduction} (FID \code{legacy\_tensorflow} 50~k, NFE \code{dopri5}, EMA) est
+inchangé, conformément au retour de correction.
+
+% =====================================================================
+\section*{Périmètre de la reproduction (résumé exigé par le sujet)}
+\addcontentsline{toc}{section}{Périmètre de la reproduction}
+
+\begin{table}[h]
+\centering
+\caption{Périmètre de la reproduction (version resit) : ce qui est reproduit, simplifié, évalué, la baseline de référence et la correspondance ablation~$\to$~hypothèse.}
+\label{tab:perimetre}
+\begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{3.2cm} X}
+\toprule
+Question du sujet & Réponse \\
+\midrule
+Ce qui est reproduit &
+La ligne \textbf{FM-OT} de la \emph{Table~1} du papier sur CIFAR-10 (FID + NFE) ; la Fig.~4 (toy 2D, trajectoires droites) ; la courbe de FID au cours de l'entraînement ; les trajectoires de sampling FM-OT. \\
+\addlinespace
+Ce qui est simplifié &
+Une seule méthode (FM-OT) et un seul dataset (CIFAR-10 $32\times32$) ; \textbf{backbone réduit à 6,9~M params} (vs 38,3~M) pour diviser le coût ; \textbf{150~k steps} (vs 391~k) ; FID mi-entraînement sur 10~k échantillons (50~k pour le chiffre final) ; LR schedule warmup + decay linéaire ; pas de likelihood / NLL. \\
+\addlinespace
+Ce qui est évalué &
+FID (\code{clean-fid}, protocole \code{legacy\_tensorflow}, 50~k samples) ; NFE moyen du solveur adaptatif \code{dopri5} ; qualité visuelle ; \textbf{rectitude des trajectoires} $C$ (§\ref{sec:ablation}). \\
+\addlinespace
+Référence de comparaison &
+Le \textbf{FM-OT du papier} (FID 6.35, backbone complet). On compare l'\emph{ordre de grandeur} et la \emph{tendance} (rectitude $\to$ NFE faible), pas l'égalité absolue, le modèle étant $\sim$5,5$\times$ plus petit. \\
+\addlinespace
+Ablation $\to$ hypothèse &
+\emph{Rectitude des trajectoires} (§\ref{sec:ablation}) sur deux axes. (A) $C$ et FID vs NFE/solveur $\to$ teste « le champ OT, presque droit, tolère une intégration d'ordre faible à petit NFE ». (B) $C$ au fil de l'entraînement $\to$ teste « le champ marginal appris se redresse vers la droite OT idéale en convergeant ». \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% =====================================================================
+\section{Introduction}
+
+Les modèles de diffusion (DDPM~\cite{ho2020ddpm}) génèrent des images en inversant un processus de bruitage stochastique. Leur entraînement repose sur un objectif de \emph{score/bruit-matching} et leur échantillonnage suit une SDE/ODE dont la trajectoire est intrinsèquement \textbf{courbe}, ce qui impose des centaines d'évaluations réseau (NFE) pour un bon FID.
+
+\textbf{Flow Matching (FM)}~\cite{lipman2023flow} reformule le problème comme l'apprentissage direct d'un \textbf{champ de vitesses} $v_\theta(x,t)$ qui transporte une gaussienne $p_0 = \mathcal{N}(0, I)$ vers la distribution des données $p_1$ le long d'un \emph{chemin de probabilité conditionnel} $p_t(x \mid x_1)$. L'idée centrale du papier, et \textbf{l'angle de notre reproduction}, est la suivante :
+
+\begin{quote}
+Le choix du chemin conditionnel est un \textbf{degré de liberté libre}. En prenant un chemin de \textbf{Transport Optimal} (interpolation affine bruit$\to$donnée), on obtient des trajectoires \textbf{droites à vitesse constante}, ce qui se traduit empiriquement par (i) un bon FID et (ii) un \textbf{NFE faible}, l'intégration ODE d'un champ droit étant facile.
+\end{quote}
+
+On reproduit cette affirmation dans un cadre réduit Colab \textbf{centré sur FM-OT}, puis on la \textbf{quantifie} via une métrique de rectitude des trajectoires reliant la géométrie du chemin au coût d'échantillonnage.
+
+% =====================================================================
+\section{Méthode : le papier, déroulé}
+\label{sec:methode}
+
+On note $x_1 \sim q$ une donnée (image), $x_0 \sim \mathcal{N}(0, I)$ un bruit, et $t \in [0,1]$ le temps (convention du papier : $t{=}0$ bruit, $t{=}1$ donnée).
+
+\subsection{Champ de vitesses, flot et équation de continuité}
+
+On cherche un \textbf{champ de vitesses} dépendant du temps $u_t : \mathbb{R}^d \to \mathbb{R}^d$ dont le flot $\phi_t$, défini par l'EDO
+\begin{equation}
+\frac{d}{dt}\phi_t(x) = u_t\big(\phi_t(x)\big), \qquad \phi_0(x) = x,
+\label{eq:ode}
+\end{equation}
+transporte la densité initiale $p_0$ vers la densité cible $p_1 = q$. Si l'on note $p_t$ la densité de $\phi_t(x)$ quand $x \sim p_0$, alors $p_t$ et $u_t$ sont liés par l'\textbf{équation de continuité} (conservation de la masse de probabilité) :
+\begin{equation}
+\partial_t p_t(x) + \nabla \!\cdot\! \big(p_t(x)\, u_t(x)\big) = 0.
+\label{eq:continuity}
+\end{equation}
+On dit alors que $u_t$ \emph{génère} le chemin de probabilité $p_t$. Apprendre à générer $q$ revient donc à trouver un $u_t$ générant un chemin $p_t$ qui interpole $p_0 = \mathcal{N}(0,I)$ et $p_1 = q$. La Fig.~\ref{fig:generative} illustre cette vue.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth,scale=1.0]
+  % distributions
+  \draw[thick,fill=blue!8] (0,0) ellipse (1.1 and 1.4);
+  \node at (0,-1.85) {\small $p_0 = \mathcal{N}(0,I)$};
+  \draw[thick,fill=red!8] (8,0.6) ellipse (0.7 and 0.55);
+  \draw[thick,fill=red!8] (8.2,-0.9) ellipse (0.6 and 0.5);
+  \node at (8.1,-1.85) {\small $p_1 = q$ (données)};
+  % points
+  \fill (0.2,0.3) circle (1.6pt) node[left]{\small $x_0$};
+  \fill (8.0,0.65) circle (1.6pt) node[right]{\small $x_1$};
+  % straight OT path
+  \draw[->,very thick,green!55!black] (0.2,0.3) -- (8.0,0.65)
+     node[midway,above,sloped]{\small chemin OT (droit)};
+  % curved diffusion path
+  \draw[->,thick,orange!85!black,decorate,decoration={snake,amplitude=0.9mm,segment length=4mm}]
+     (0.2,0.3) .. controls (3,-2.2) and (6,2.4) .. (8.0,0.65);
+  \node[orange!85!black] at (4.2,-1.7) {\small chemin diffusion (courbe)};
+  % velocity arrows along straight
+  \foreach \s in {0.28,0.5,0.72} {
+    \coordinate (P) at ($(0.2,0.3)!\s!(8.0,0.65)$);
+    \draw[->,green!45!black] (P) -- ++(0.7,0.03);
+  }
+\end{tikzpicture}
+\caption{Vue générative. Un champ $u_t$ pousse $p_0$ (gauche) vers $p_1$ (droite). Pour une paire $(x_0,x_1)$, le chemin \textbf{OT} est la droite à vitesse constante (vert, vecteurs vitesse identiques le long du trajet) ; un chemin de diffusion (orange) atteint la même donnée par une trajectoire \emph{courbe}, plus coûteuse à intégrer.}
+\label{fig:generative}
+\end{figure}
+
+\subsection{Du marginal (intraitable) au conditionnel (calculable)}
+
+On ne sait pas construire directement $u_t$ générant $q$. L'astuce du papier est de \textbf{conditionner sur la donnée} $x_1$. On choisit pour chaque $x_1$ un chemin conditionnel \emph{gaussien}
+\begin{equation}
+p_t(x \mid x_1) = \mathcal{N}\!\big(x \mid \mu_t(x_1),\, \sigma_t(x_1)^2 I\big),
+\qquad
+x_t = \underbrace{\sigma_t(x_1)\, x_0 + \mu_t(x_1)}_{=\,\psi_t(x_0)},
+\label{eq:condpath}
+\end{equation}
+avec des bornes $\mu_0 = 0,\ \sigma_0 = 1$ (donc $p_0(\cdot\mid x_1) = \mathcal{N}(0,I)$) et $\mu_1 = x_1,\ \sigma_1 \approx 0$ (donc $p_1(\cdot\mid x_1) \approx \delta_{x_1}$). La densité \textbf{marginale} reconstruit alors les données :
+\begin{equation}
+p_t(x) = \int p_t(x \mid x_1)\, q(x_1)\, dx_1
+\;\Longrightarrow\;
+p_1(x) = \int \delta_{x_1}(x)\, q(x_1)\, dx_1 = q(x).
+\label{eq:marg}
+\end{equation}
+Si $u_t(\cdot \mid x_1)$ génère $p_t(\cdot \mid x_1)$, on montre (papier, Th.~1) que le \textbf{champ marginal}
+\begin{equation}
+u_t(x) = \int u_t(x \mid x_1)\, \frac{p_t(x \mid x_1)\, q(x_1)}{p_t(x)}\, dx_1
+\label{eq:margfield}
+\end{equation}
+génère $p_t$ : il suffit d'injecter \eqref{eq:margfield} dans \eqref{eq:continuity} et d'utiliser la linéarité de la divergence. Mais $u_t(x)$ contient $p_t(x)$ au dénominateur : \textbf{intraitable}. La Fig.~\ref{fig:condmarg} illustre conditionnel vs marginal.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth,scale=1.0]
+  \fill (0,0) circle (1.8pt) node[left]{\small $x_0$};
+  \foreach \y/\name in {1.6/{x_1^{(1)}},0.4/{x_1^{(2)}},-0.9/{x_1^{(3)}}} {
+    \fill (6,\y) circle (1.6pt) node[right]{\small $\name$};
+    \draw[->,green!50!black,thick] (0,0) -- (6,\y);
+  }
+  \node[green!45!black] at (3,1.65) {\small chemins conditionnels (droites OT)};
+  % marginal averaged field arrow
+  \draw[->,very thick,purple] (0,0) -- (2.4,0.16);
+  \node[purple] at (1.4,-0.45) {\small champ marginal $u_t(x_0)$ (moyenne pondérée)};
+\end{tikzpicture}
+\caption{Conditionnel vs marginal. Pour un même $x_0$, chaque donnée $x_1^{(j)}$ définit une droite conditionnelle OT (vert). Le champ marginal \eqref{eq:margfield} en $x$ est la moyenne des champs conditionnels, pondérée par la vraisemblance postérieure $p_t(x\mid x_1)q(x_1)/p_t(x)$ (violet). C'est ce champ marginal que le réseau apprend.}
+\label{fig:condmarg}
+\end{figure}
+
+\subsection{Équivalence des gradients : Flow Matching $\leftrightarrow$ Conditional FM}
+
+On voudrait régresser le champ marginal,
+\begin{equation}
+\mathcal{L}_{\text{FM}}(\theta) = \mathbb{E}_{t,\, x \sim p_t}\, \big\| v_\theta(x,t) - u_t(x) \big\|^2,
+\label{eq:lfm}
+\end{equation}
+mais $u_t(x)$ est intraitable. On régresse plutôt la cible \emph{conditionnelle}, calculable en échantillonnant $x_1 \sim q$, $x_0 \sim \mathcal{N}(0,I)$, $x_t = \psi_t(x_0)$ :
+\begin{equation}
+\mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t,\, x_1,\, x_0}\, \big\| v_\theta(x_t,t) - u_t(x_t \mid x_1) \big\|^2.
+\label{eq:lcfm}
+\end{equation}
+\textbf{Théorème~2 du papier} : $\nabla_\theta \mathcal{L}_{\text{FM}} = \nabla_\theta \mathcal{L}_{\text{CFM}}$, donc les deux objectifs ont les mêmes minima en $\theta$. \emph{Preuve (esquisse).} Développons les deux carrés ; seuls les termes dépendant de $\theta$ comptent pour le gradient :
+\[
+\big\| v_\theta - u \big\|^2 = \|v_\theta\|^2 - 2\,\langle v_\theta, u\rangle + \underbrace{\|u\|^2}_{\perp\,\theta}.
+\]
+\emph{(i) Terme quadratique.} Comme la loi de $x_t$ (en échantillonnant $x_1\sim q$ puis $x_0$) est exactement la marginale $p_t$ \eqref{eq:marg},
+\[
+\mathbb{E}_{x_1,x_0}\, \|v_\theta(x_t,t)\|^2 = \mathbb{E}_{x\sim p_t}\, \|v_\theta(x,t)\|^2 .
+\]
+\emph{(ii) Terme croisé.} En utilisant la définition \eqref{eq:margfield} de $u_t(x)$,
+\[
+\mathbb{E}_{x\sim p_t}\langle v_\theta(x,t), u_t(x)\rangle
+= \int \Big\langle v_\theta(x,t),\ \int u_t(x\mid x_1)\tfrac{p_t(x\mid x_1)q(x_1)}{p_t(x)}dx_1 \Big\rangle p_t(x)\,dx
+\]
+\[
+= \iint \big\langle v_\theta(x,t), u_t(x\mid x_1)\big\rangle\, p_t(x\mid x_1)\, q(x_1)\, dx_1\, dx
+= \mathbb{E}_{x_1,x_0}\big\langle v_\theta(x_t,t), u_t(x_t\mid x_1)\big\rangle,
+\]
+le $p_t(x)$ se simplifiant. Les deux termes dépendant de $\theta$ coïncident, donc les gradients aussi. $\square$ C'est exactement ce qu'implémente \code{losses.py} : un unique \code{flow\_matching\_loss} = MSE entre $v_\theta(x_t,t)$ et \code{path.target(...)}.
+
+\subsection{Le champ conditionnel gaussien : Théorème~3}
+
+Reste à expliciter $u_t(x\mid x_1)$ pour un chemin gaussien \eqref{eq:condpath}. Le flot conditionnel est l'application affine $\psi_t(x_0) = \sigma_t x_0 + \mu_t$ (on omet l'argument $x_1$). Par définition d'un champ générant un flot \eqref{eq:ode}, la vitesse au point $\psi_t(x_0)$ est
+\begin{equation}
+u_t\big(\psi_t(x_0)\mid x_1\big) = \frac{d}{dt}\psi_t(x_0) = \sigma_t'\, x_0 + \mu_t'.
+\label{eq:psidot}
+\end{equation}
+Pour l'exprimer en un point courant $x = \psi_t(x_0)$, on inverse l'affine : $x_0 = (x - \mu_t)/\sigma_t$. En substituant dans \eqref{eq:psidot} :
+\begin{equation}
+\boxed{\,u_t(x \mid x_1) = \frac{\sigma_t'}{\sigma_t}\,(x - \mu_t) + \mu_t'\,}
+\label{eq:th3}
+\end{equation}
+ce qui est le \textbf{Théorème~3} du papier. Toute la spécificité d'un chemin tient donc dans le couple $(\mu_t, \sigma_t)$.
+
+\subsection{Spécialisation au chemin OT : la trajectoire est une droite}
+\label{sec:ot}
+
+Le chemin de Transport Optimal (interpolation affine) prend
+\begin{equation}
+\mu_t = t\, x_1, \qquad \sigma_t = 1 - (1-\sigma_{\min})\,t,
+\qquad \sigma_{\min} = 10^{-4}.
+\end{equation}
+On a $\mu_t' = x_1$ et $\sigma_t' = -(1-\sigma_{\min})$ (constants). Le long du flot, $x - \mu_t = \psi_t(x_0) - t x_1 = \sigma_t x_0$, donc $\tfrac{\sigma_t'}{\sigma_t}(x-\mu_t) = \sigma_t'\, x_0 = -(1-\sigma_{\min})\,x_0$, et \eqref{eq:th3} devient
+\begin{equation}
+\boxed{\,u_t(x_t \mid x_1) = x_1 - (1-\sigma_{\min})\, x_0\,}
+\label{eq:otfield}
+\end{equation}
+\textbf{indépendant de $t$}. La trajectoire conditionnelle $\psi_t(x_0) = \big(1-(1-\sigma_{\min})t\big)x_0 + t\,x_1$ est affine en $t$, donc $\psi_t''(x_0) = \sigma_t''\, x_0 = 0$ : c'est une \textbf{droite parcourue à vitesse constante}. Géométriquement, $p_t(\cdot\mid x_1)$ est l'\emph{interpolation de déplacement} (transport optimal de McCann) entre $\mathcal{N}(0,I)$ et $\mathcal{N}(x_1,\sigma_{\min}^2 I)$. C'est l'origine de l'avantage attendu : un champ dont les courbes intégrales conditionnelles sont droites est facile à intégrer numériquement.
+
+\subsection{Échantillonnage et lien rectitude $\to$ NFE}
+\label{sec:samplelink}
+
+Une fois $v_\theta \approx u_t$ appris, on génère en intégrant l'EDO déterministe $\dot x = v_\theta(x,t)$ de $t{=}0$ ($x_0\sim\mathcal{N}(0,I)$) à $t{=}1$. Le \textbf{coût} se mesure en NFE (nombre d'évaluations réseau). Pour un pas d'Euler $h$, l'erreur de troncature locale vaut
+\[
+x_{t+h} - \big(x_t + h\,v_\theta(x_t,t)\big) = \tfrac{1}{2}h^2\, \ddot x(\xi) = \tfrac{1}{2}h^2\, \psi''(\xi),
+\]
+qui s'annule pour un champ dont les trajectoires sont droites ($\psi'' = 0$). \textbf{Conclusion} : plus le champ est droit, moins il faut de pas (NFE) pour un FID donné. Le champ marginal \emph{appris} n'est pas exactement droit (la moyenne \eqref{eq:margfield} de droites n'est pas une droite), d'où une déviation résiduelle que l'on \textbf{mesure} en §\ref{sec:ablation}.
+
+\subsection{Architecture (\code{unet.py})}
+
+U-Net \textbf{ADM}~\cite{dhariwal2021adm} réimplémenté, \textbf{en version réduite} pour le resit : ResBlocks GroupNorm + injection FiLM du temps, self-attention à la résolution 16, down/up-sampling par conv. \code{base\_channels=64}, \code{mult=(1,2,2)} (canaux $\to 128$ à la résolution 16, attention 4 têtes $\times$ 32 = pleine largeur), \code{depth=2}. \textbf{6\,949\,187 paramètres} (vérifié par \code{sum(p.numel())}), soit $\sim$5,5$\times$ moins que le backbone complet (38,3~M) de la version initiale --- d'où la réduction de coût demandée. Le toy 2D utilise un MLP $5\times512$.
+
+% =====================================================================
+\section{Cadre de reproduction}
+
+\begin{table}[h]
+\centering
+\caption{Hyper-paramètres et protocole d'évaluation (resit). Le protocole d'évaluation est conservé ; le modèle et le budget de steps sont réduits.}
+\label{tab:config}
+\begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{3.6cm} X}
+\toprule
+Élément & Valeur \\
+\midrule
+Modèle & U-Net ADM réduit, \textbf{6,9~M params} (\code{adm\_unet\_cifar10\_small}). \\
+Dataset & CIFAR-10 train (50\,000 images $32\times32$), normalisé $[-1,1]$, flip horizontal aléatoire. \\
+Optim & Adam $(\beta = 0.9/0.999,\ \varepsilon = 10^{-8})$, \code{lr\_peak}~$=10^{-4}$, \code{wd}~$=0$. \\
+LR schedule & warmup linéaire \textbf{5~k} steps + decay linéaire jusqu'à $10^{-8}$. \\
+Batch effectif & 256 = batch physique 64 $\times$ \code{accum\_iter} 4. \\
+Steps & \textbf{150\,000} (steps optimiseur ; réduit vs 391~k, modèle plus petit convergeant plus vite). \\
+EMA & 0.9999 avec warmup de biais ; \textbf{l'évaluation se fait sur les poids EMA}. \\
+Précision & FP32 sur GPU d'éval ; bf16 possible à l'entraînement A100. \\
+$\sigma_{\min}$ (OT) & $10^{-4}$. \\
+Solveur \og{}Table~1\fg{} & \code{dopri5} adaptatif, $\text{atol} = \text{rtol} = 10^{-5}$ (valeur du papier). \\
+Métrique & FID \code{clean-fid}, \code{mode="legacy\_tensorflow"} (Inception TF), \textbf{50~k} échantillons. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Métrique principale.} Le FID \code{legacy\_tensorflow} est imposé par la comparabilité au papier : \code{mode="clean"}~\cite{parmar2022cleanfid} donnerait des scores systématiquement différents (\code{fid.py}). Le NFE moyen de \code{dopri5}~\cite{chen2018neuralode} mesure le \emph{coût d'échantillonnage}.
+
+\textbf{Coût.} \textbf{Un seul run} FM-OT (150~k steps, modèle 6,9~M) au lieu de 3~$\times$~391~k : le budget GPU est réduit d'environ un ordre de grandeur par rapport à la version initiale.
+
+\textbf{Validation amont (notebook 01, toy 2D).} On valide la pipeline sur la densité « damier » du papier (Fig.~4) avec le MLP : le modèle FM-OT reconstruit le damier en $\sim$15~min CPU et ses trajectoires Euler sont des droites (Fig.~\ref{fig:toy2d}).
+
+\begin{figure}[h]
+\centering
+\figslot{pics/fig4_toy2d.png}{5cm}{Fig.~4 (reproduction) --- damier 2D et trajectoires Euler de FM-OT (droites). Générée par \texttt{notebooks/01\_sanity\_2d.ipynb}.}
+\caption{Sanity-check 2D (densité en damier) : samples et trajectoires FM-OT, reproduction de la Fig.~4 du papier.}
+\label{fig:toy2d}
+\end{figure}
+
+\textbf{Garde-fous d'implémentation.} La suite \code{pytest tests/} (verte) vérifie notamment que la cible analytique $u_t$ de chaque chemin égale $\partial_t \psi_t$ par autodiff (tol.~$10^{-5}$), et que la métrique de rectitude $C$ vaut $\approx 0$ sur un champ analytiquement droit et croît sur un champ courbe (\code{tests/test\_metrics.py}).
+
+% =====================================================================
+\section{Résultats}
+
+\begin{quote}
+\small\textbf{Note de transparence.} Les notebooks sont commités sans sortie (\code{nbstripout}). Les valeurs ci-dessous sont \textbf{à régénérer} par \code{notebooks/02\_fm\_ot\_colab.ipynb} après le run Colab du modèle réduit ; elles sont laissées en \TODO{à compléter} pour ne pas reporter d'anciens chiffres (issus du modèle 38,3~M), invalides ici.
+\end{quote}
+
+\subsection{FM-OT --- résultat principal}
+
+\begin{table}[h]
+\centering
+\caption{FM-OT : FID(50~k, \code{legacy\_tensorflow}) et NFE moyen (\code{dopri5}). La colonne « papier » correspond au backbone \emph{complet} ; on attend un FID supérieur avec un modèle $\sim$5,5$\times$ plus petit, mais le même régime de NFE faible.}
+\label{tab:table1}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Modèle & FID (notre repro, 6,9~M) & FID (papier, 38,3~M) & NFE moyen (dopri5) \\
+\midrule
+\textbf{FM-OT} (CFM) & \TODO{à compléter} & 6.35 & \TODO{à compléter} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Lecture attendue.} On vise à reproduire la \emph{tendance} du papier : un FID raisonnable et surtout un \textbf{NFE \code{dopri5} modéré}, signature d'un champ régulier. L'écart absolu de FID au papier est attendu et imputable au modèle réduit (5,5$\times$ moins de paramètres) et au budget de steps réduit.
+
+\subsection{FID au cours de l'entraînement}
+
+\begin{table}[h]
+\centering
+\caption{FID mi-entraînement (EMA, 10~k samples $\to$ biaisé $\uparrow$, à lire en relatif), tous les 25~k steps.}
+\label{tab:fig5}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Step (k) & 25 & 50 & 75 & 100 & 125 & 150 \\
+\midrule
+FM-OT & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On attend une décroissance monotone du FID, l'essentiel du gain étant acquis tôt (chemin OT facile à apprendre).
+
+\subsection{Trajectoires de sampling FM-OT}
+
+\begin{figure}[h]
+\centering
+\figslot{pics/fig_traj_ot.png}{5.5cm}{Trajectoire FM-OT (Euler 200 pas), 8 bruits identiques, états à $t\in\{0,1/3,2/3,1\}$. Générée par \texttt{notebooks/02\_fm\_ot\_colab.ipynb} (\texttt{report/pics/fig\_traj\_ot.png}).}
+\caption{Trajectoires de sampling FM-OT depuis des bruits initiaux fixés : les structures (couleurs, layout) émergent tôt, cohérent avec un transport quasi-direct.}
+\label{fig:traj}
+\end{figure}
+
+% =====================================================================
+\section{Ablation : la métrique de rectitude}
+\label{sec:ablation}
+
+L'unique ablation de cette version est la \textbf{quantification de la rectitude} des trajectoires --- la propriété géométrique au cœur de l'avantage OT (§\ref{sec:ot}, §\ref{sec:samplelink}).
+
+\subsection{Définition de la métrique $C$}
+
+Le papier montre la rectitude qualitativement (Fig.~4/6). On la \textbf{mesure} : pour une trajectoire intégrée $\{x_{t_k}\}$ allant du bruit $x_0$ à l'échantillon final $x_1$, on définit la déviation moyenne à la corde droite bruit$\to$donnée,
+\begin{equation}
+C = \frac{1}{N}\sum_i \frac{1}{K}\sum_k \big\| x^{(i)}_{t_k} - \big[(1-s_k)\,x^{(i)}_0 + s_k\,x^{(i)}_1\big] \big\|_2
+\;\Big/\; \big\| x^{(i)}_1 - x^{(i)}_0 \big\|_2,
+\label{eq:rectitude}
+\end{equation}
+où $s_k = t_k / t_{\text{end}} \in [0,1]$ est le temps renormalisé. Une trajectoire parfaitement droite donne $C = 0$ ; $C$ croît avec la courbure (Fig.~\ref{fig:rectitude}). La métrique est implémentée dans \code{metrics.py} (\code{straightness}) et invariante d'échelle par la normalisation.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[>=Stealth,scale=1.0]
+  \coordinate (A) at (0,0);
+  \coordinate (B) at (8,0.4);
+  \fill (A) circle (1.6pt) node[left]{\small $x_0$};
+  \fill (B) circle (1.6pt) node[right]{\small $x_1$};
+  % chord
+  \draw[dashed,thick] (A) -- (B) node[midway,below,sloped]{\small corde droite};
+  % curved integrated trajectory
+  \draw[very thick,orange!85!black] (A) .. controls (2.5,2.0) and (5.5,1.6) .. (B);
+  \node[orange!85!black] at (3.0,2.05) {\small trajectoire intégrée $\{x_{t_k}\}$};
+  % deviation segments
+  \foreach \s/\h in {0.25/1.05,0.5/1.15,0.72/0.78} {
+    \coordinate (C) at ($(A)!\s!(B)$);
+    \draw[<->,blue!70!black] (C) -- ++(0,\h);
+  }
+  \node[blue!70!black] at (6.6,1.3) {\small déviations (numérateur de $C$)};
+\end{tikzpicture}
+\caption{Définition visuelle de la rectitude $C$ \eqref{eq:rectitude} : on intègre la trajectoire (orange), on trace la corde $x_0\!\to\!x_1$ (pointillés) et on moyenne les déviations (bleu) le long du trajet, normalisées par la longueur de la corde. $C=0$ ssi la trajectoire est la corde.}
+\label{fig:rectitude}
+\end{figure}
+
+\subsection{Axe A --- rectitude et FID en fonction du NFE / solveur}
+
+\textbf{Hypothèse.} Si le champ FM-OT est presque droit ($C$ petit), un intégrateur d'ordre faible à petit NFE doit déjà donner un bon FID (§\ref{sec:samplelink}), et les solveurs d'ordre élevé (RK4) n'apporteraient qu'un gain marginal.
+
+\textbf{Protocole.} FM-OT, grille NFE $\{4,8,16,32,64\}$, solveurs Euler / Midpoint(RK2) / RK4 à NFE~= nombre d'évaluations réseau. On mesure conjointement $C$ \eqref{eq:rectitude} et le FID (10~k samples, biaisé $\uparrow$, lecture \emph{relative}).
+
+\begin{table}[h]
+\centering
+\caption{FM-OT --- $C$ et FID(10~k) en fonction du NFE et du solveur. \TODO{à compléter} après le run.}
+\label{tab:axisA}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+NFE & 4 & 8 & 16 & 32 & 64 \\
+\midrule
+FID Euler / $C$    & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} \\
+FID Midpoint / $C$ & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} \\
+FID RK4 / $C$      & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} & \TODO{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\figslot{pics/fig_rectitude_nfe.png}{5.5cm}{FM-OT --- (gauche) FID vs NFE, (droite) $C$ vs NFE, pour Euler / Midpoint / RK4. Générée par \texttt{notebooks/02\_fm\_ot\_colab.ipynb} (\texttt{report/pics/fig\_rectitude\_nfe.png}).}
+\caption{Axe A : rectitude et coût d'échantillonnage. On attend une convergence des solveurs dès NFE modéré et un $C$ faible, signant un champ régulier.}
+\label{fig:axisA}
+\end{figure}
+
+\textbf{Interprétation attendue.} Un $C$ faible et stable, conjugué à une convergence rapide des solveurs (Euler rattrape RK4 dès NFE $\sim$16), confirmerait mécaniquement le lien \emph{rectitude $\Rightarrow$ NFE faible} dérivé en §\ref{sec:samplelink}.
+
+\subsection{Axe B --- rectitude au fil de l'entraînement}
+
+\textbf{Hypothèse.} Au début de l'entraînement, le champ marginal appris est imprécis et ses trajectoires sont courbes ($C$ grand) ; en convergeant, il se \textbf{redresse} vers la géométrie droite du chemin OT idéal ($C$ décroît).
+
+\textbf{Protocole.} On calcule $C$ (Euler 100 pas, 512 trajectoires) sur chaque checkpoint sauvegardé (\code{ckpt\_every}~=~25~k). Aucun FID ici : l'axe B est quasi gratuit.
+
+\begin{figure}[h]
+\centering
+\figslot{pics/fig_rectitude_train.png}{5cm}{FM-OT --- $C$ en fonction du step d'entraînement. Générée par \texttt{notebooks/02\_fm\_ot\_colab.ipynb} (\texttt{report/pics/fig\_rectitude\_train.png}).}
+\caption{Axe B : la rectitude au cours de l'apprentissage. On attend une décroissance de $C$ : le réseau \emph{apprend} à rendre ses trajectoires droites.}
+\label{fig:axisB}
+\end{figure}
+
+\textbf{Interprétation attendue.} Une décroissance de $C(\text{step})$ corrélée à celle du FID (Table~\ref{tab:fig5}) montrerait que l'amélioration de la qualité d'image s'accompagne d'un redressement géométrique des trajectoires --- la rectitude comme \emph{diagnostic d'entraînement}, au-delà de la seule explication du coût de sampling.
+
+% =====================================================================
+\section{Discussion critique}
+\label{sec:discussion}
+
+\textbf{Ce qui est attendu.} L'affirmation centrale du papier --- chemin OT $\Rightarrow$ trajectoires droites $\Rightarrow$ NFE faible --- est testée directement et de deux façons indépendantes : l'axe A relie la rectitude au \emph{coût de sampling}, l'axe B la relie à la \emph{dynamique d'entraînement}. La dérivation §\ref{sec:samplelink} en donne la raison (erreur d'Euler $\propto \psi''$, nulle pour une droite).
+
+\textbf{Limites assumées de la version réduite.}
+\begin{itemize}
+\item \textbf{Écart absolu de FID au papier.} Le modèle est $\sim$5,5$\times$ plus petit (6,9~M vs 38,3~M) et entraîné sur 150~k steps : le FID absolu sera nécessairement plus haut. Seuls la \emph{tendance} (NFE faible) et le \emph{comportement de $C$} sont l'objet de la reproduction, pas l'égalité numérique.
+\item \textbf{Pas de comparaison VP/DDPM.} En se restreignant à FM-OT, on perd la double-ablation « géométrie vs cible » de la version initiale ; la rectitude se lit donc en \emph{absolu} (valeur de $C$, sa stabilité en NFE, sa décroissance à l'entraînement) plutôt qu'en \emph{contraste} entre chemins. Le code VP/DDPM reste disponible si l'on veut réintroduire ce contraste.
+\item \textbf{Pas de multi-seed.} Un seul run : pas de barre d'erreur. La robustesse vient ici de la cohérence interne (axes A et B pointant la même conclusion) plutôt que de la répétition.
+\item \textbf{FID mi-entraînement à 10~k} biaisé $\uparrow$ : les courbes et l'axe~A sont à lire en relatif.
+\end{itemize}
+
+\textbf{Bilan.} Une reproduction \emph{resserrée} : un seul modèle, petit, une seule méthode (FM-OT), et une seule ablation --- la rectitude --- mais traitée en profondeur (définition métrique, deux axes, lien théorique explicite avec le coût de sampling et la dynamique d'entraînement). Le coût de calcul est divisé d'environ un ordre de grandeur par rapport à la version initiale, conformément au retour de correction.
+
+\newpage
+\setstretch{1}  % reduce bibliography line spacing
+\printbibliography[heading=bibintoc]
+
+\end{document}

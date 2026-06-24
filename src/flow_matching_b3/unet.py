@@ -252,6 +252,31 @@ def adm_unet_cifar10(dropout: float = 0.0) -> UNet:
     )
 
 
+def adm_unet_cifar10_small(dropout: float = 0.0) -> UNet:
+    """Reduced ADM CIFAR-10 config for the resit: base 64 ch (→128 at res 16), depth 2, attn@16.
+
+    base=64 with mult (1,2,2) reaches 128 channels at resolution 16, where the
+    4×32=128 attention covers the full width. Dropping one resolution level (mult
+    has 3 entries, not 4) and halving the width cuts the parameter count by ~6×
+    versus the full ADM backbone, slashing the training cost while preserving the
+    architecture family. Exact param count printed via ``sum(p.numel())``.
+    """
+    return UNet(
+        UNetConfig(
+            image_size=32,
+            in_channels=3,
+            out_channels=3,
+            base_channels=64,
+            channels_mult=(1, 2, 2),
+            num_res_blocks=2,
+            attn_resolutions=(16,),
+            num_heads=4,
+            head_channels=32,
+            dropout=dropout,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2-D MLP for the checkerboard sanity experiment (paper §6, Fig. 4)
 # ---------------------------------------------------------------------------
