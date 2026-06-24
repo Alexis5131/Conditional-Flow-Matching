@@ -260,7 +260,10 @@ def load_ckpt(
     _unwrap(model).load_state_dict(state["model"])
     optim.load_state_dict(state["optim"])
     ema.load_state_dict(state["ema"])
-    return state["step"], state["rng"]
+    # RNG states must be CPU ByteTensors, but map_location=device moved them onto the
+    # GPU (→ "RNG state must be a torch.ByteTensor" in set_rng_state). Coerce them back.
+    rng = {k: v.to(device="cpu", dtype=torch.uint8) for k, v in state["rng"].items()}
+    return state["step"], rng
 
 
 def find_latest_ckpt(run_dir: Path) -> Path | None:
