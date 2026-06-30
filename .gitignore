@@ -15,3 +15,7 @@ wandb/
 
 # notebook outputs (use nbstripout)
 .ipynb_checkpoints/
+
+# macOS
+.DS_Store
+**/.DS_Store
